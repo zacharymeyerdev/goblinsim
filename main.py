@@ -59,17 +59,22 @@ class WaterSource:
 # Base Creature Class
 # -------------------------------
 class Creature:
-    def __init__(self, x, y, health, base_speed):
+    def __init__(self, x, y, health, base_speed, hunger_duration):
         self.pos = np.array([x, y], dtype=float)
         self.vel = np.array([0.0, 0.0], dtype=float)  # Ensure vel is float64
         self.health = health
         self.max_health = health
         self.base_speed = base_speed
+        self.hunger_timer = hunger_duration  # Hunger duration in frames
+
     def update_position(self):
         self.pos += self.vel
         self.pos[0] = max(0, min(WIDTH, self.pos[0]))
         self.pos[1] = max(0, min(HEIGHT, self.pos[1]))
 
+    def update_hunger(self):
+        self.hunger_timer -= 1
+        return self.hunger_timer <= 0
 # -------------------------------
 # Goblin Class (Q–Learning, Grouping, Overrides to Attack Predators)
 # All goblins are now red.
@@ -78,14 +83,12 @@ class Goblin(Creature):
     def __init__(self, x, y,
                  q_weights1=None, q_bias1=None, q_weights2=None, q_bias2=None,
                  alpha=0.01, gamma=0.9, epsilon=0.1):
-        # Improved skills: higher speed (3.0) and higher attack damage (15)
-        super().__init__(x, y, 50, base_speed=3.0)
+        super().__init__(x, y, 50, base_speed=3.0, hunger_duration=400)  # 20 seconds at 30 FPS
         self.energy = 0
         self.attack_damage = 15
         self.alpha = alpha      # Learning rate
         self.gamma = gamma      # Discount factor
         self.epsilon = epsilon  # Exploration rate
-        # Q–network: input dim 2, hidden 4, output 2 (0: hunt boars, 1: forage)
         self.q_weights1 = q_weights1 if q_weights1 is not None else np.random.randn(2, 4)
         self.q_bias1    = q_bias1 if q_bias1 is not None else np.random.randn(4)
         self.q_weights2 = q_weights2 if q_weights2 is not None else np.random.randn(4, 2)
@@ -95,30 +98,46 @@ class Goblin(Creature):
         self.batch_size = 4
         self.last_state = np.zeros(2)
         self.last_action = 0
-        # All goblins are red
+        self.target = None  # Track the current target
         self.color = (255, 0, 0)
+
     def get_state(self, boars, plants):
         boar_near = 1.0 if any(distance(self.pos, b.pos) < 150 for b in boars) else 0.0
         plant_near = 1.0 if any(p.active and distance(self.pos, p.pos) < 150 for p in plants) else 0.0
         return np.array([boar_near, plant_near])
+
     def q_forward(self, state):
         hidden = np.tanh(np.dot(state, self.q_weights1) + self.q_bias1)
         return np.dot(hidden, self.q_weights2) + self.q_bias2
-    def choose_action(self, boars, plants):
+
+    def choose_action(self, boars, plants, goblins):
         state = self.get_state(boars, plants)
         if random.random() < self.epsilon:
             action = random.choice([0, 1])
         else:
             q_vals = self.q_forward(state)
             action = int(np.argmax(q_vals))
+
+        # Adjust action based on other goblins' targets
+        if action == 0:  # Hunting boars
+            for g in goblins:
+                if g is not self and g.target in boars:
+                    action = 1 if random.random() < 0.5 else action
+        elif action == 1:  # Foraging plants
+            for g in goblins:
+                if g is not self and g.target in plants:
+                    action = 0 if random.random() < 0.5 else action
+
         self.last_state = state
         self.last_action = action
         return action
+
     def store_experience(self, reward, boars, plants):
         next_state = self.get_state(boars, plants)
         self.exp_buffer.append((self.last_state, self.last_action, reward, next_state))
         if len(self.exp_buffer) > self.buffer_size:
             self.exp_buffer.pop(0)
+
     def train_q_network(self):
         if len(self.exp_buffer) < self.batch_size:
             return
@@ -143,8 +162,8 @@ class Goblin(Creature):
         self.q_bias1    -= self.alpha * (grad_b1 / self.batch_size)
         self.q_weights2 -= self.alpha * (grad_w2 / self.batch_size)
         self.q_bias2    -= self.alpha * (grad_b2 / self.batch_size)
+
     def update(self, boars, goblins, plants, predators, speed_global=1.0):
-        # If any predator is within 100 pixels, override to target predator.
         predator_target = None
         min_pd = float('inf')
         for p in predators:
@@ -157,7 +176,7 @@ class Goblin(Creature):
             norm = np.linalg.norm(direction) + 1e-5
             self.vel = (direction / norm) * self.base_speed * speed_global
         else:
-            action = self.choose_action(boars, plants)  # 0: hunt boars, 1: forage
+            action = self.choose_action(boars, plants, goblins)  # 0: hunt boars, 1: forage
             if action == 0:
                 closest = None
                 min_d = float('inf')
@@ -170,8 +189,10 @@ class Goblin(Creature):
                     direction = (closest.pos - self.pos)
                     norm = np.linalg.norm(direction) + 1e-5
                     move = direction / norm
+                    self.target = closest
                 else:
                     move = np.array([0, 0])
+                    self.target = None
                 self.vel = move * self.base_speed * speed_global
             else:
                 closest = None
@@ -186,10 +207,12 @@ class Goblin(Creature):
                     direction = (closest.pos - self.pos)
                     norm = np.linalg.norm(direction) + 1e-5
                     move = direction / norm
+                    self.target = closest
                 else:
                     move = np.array([0, 0])
+                    self.target = None
                 self.vel = move * self.base_speed * speed_global
-        # Separation force: avoid overlapping with other goblins
+
         separation = np.array([0.0, 0.0])
         count = 0
         for other in goblins:
@@ -201,7 +224,7 @@ class Goblin(Creature):
         if count > 0:
             separation = separation / count
             self.vel += separation * 0.5
-        # Repulsion from nearby predators
+
         predator_repulse = np.array([0.0, 0.0])
         count_pred = 0
         for p in predators:
@@ -215,8 +238,8 @@ class Goblin(Creature):
         self.vel *= get_terrain_factor(self.pos)
         self.update_position()
         self.train_q_network()
+
     def try_attack(self, boars, predators, plants):
-        # Attack boars if close...
         for b in boars[:]:
             if distance(self.pos, b.pos) < 10:
                 b.health -= self.attack_damage
@@ -224,7 +247,6 @@ class Goblin(Creature):
                     self.energy += 50
                     self.store_experience(50, boars, plants)
                     boars.remove(b)
-        # Also attack predators if nearby
         for p in predators[:]:
             if distance(self.pos, p.pos) < 10:
                 p.health -= self.attack_damage
@@ -232,14 +254,17 @@ class Goblin(Creature):
                     self.energy += 50
                     self.store_experience(50, boars, plants)
                     predators.remove(p)
+
     def try_forage(self, plants, boars):
         for p in plants:
             if p.active and distance(self.pos, p.pos) < 10:
                 self.energy += 20
+                self.hunger_timer = 400  # Reset hunger timer
                 self.store_experience(20, boars, plants)
                 p.active = False
                 p.regrow_timer = PLANT_REGROW_TIME
                 break
+
     def try_reproduce(self, goblin_list):
         threshold = 60  # Lower reproduction threshold for goblins
         if self.energy >= threshold:
@@ -270,7 +295,7 @@ class Goblin(Creature):
 # -------------------------------
 class Boar(Creature):
     def __init__(self, x, y, species=None, action_weights=None):
-        super().__init__(x, y, 100, base_speed=1.5)
+        super().__init__(x, y, 100, base_speed=1.5, hunger_duration=900)  # 30 seconds at 30 FPS
         self.vel = np.array([0.0, 0.0], dtype=np.float64)  # Ensure vel is float64
         self.foraging_counter = 0
         self.reproduction_weight = 1.0
@@ -315,8 +340,6 @@ class Boar(Creature):
         self.vel = self.vel.astype(np.float64)  # Ensure vel is float64
         self.vel *= np.float64(get_terrain_factor(self.pos))
         self.update_position()
-
-    
     def try_attack(self, goblins):
         for g in goblins[:]:
             if distance(self.pos, g.pos) < 10:
@@ -338,13 +361,20 @@ class Boar(Creature):
                         other.reproduction_weight = 1.0
                         boar_list.append(child)
                         break
+    def try_forage(self, plants):
+        for p in plants:
+            if p.active and distance(self.pos, p.pos) < 10:
+                self.hunger_timer = 900  # Reset hunger timer
+                p.active = False
+                p.regrow_timer = PLANT_REGROW_TIME
+                break
 
 # -------------------------------
 # Scavenger Class (Giant Spiders - Very Solitary)
 # -------------------------------
 class Scavenger(Creature):
     def __init__(self, x, y, species=None, action_weights=None):
-        super().__init__(x, y, 40, base_speed=2.5)
+        super().__init__(x, y, 40, base_speed=2.5, hunger_duration=750)  # 25 seconds at 30 FPS
         self.energy = 0
         self.steal_amount = 20
         self.species = species if species else random.choice(["spiderA", "spiderB"])
@@ -424,8 +454,7 @@ class Scavenger(Creature):
     def try_forage(self, plants):
         for p in plants:
             if p.active and distance(self.pos, p.pos) < 10:
-                self.energy += 20
-                self.action_weights["forage"] *= 1.05
+                self.hunger_timer = 750  # Reset hunger timer
                 p.active = False
                 p.regrow_timer = PLANT_REGROW_TIME
                 break
@@ -450,7 +479,7 @@ class Scavenger(Creature):
 # -------------------------------
 class Predator(Creature):
     def __init__(self, x, y, species=None):
-        super().__init__(x, y, 80, base_speed=3.0)
+        super().__init__(x, y, 80, base_speed=3.0, hunger_duration=800)  # 26.67 seconds at 30 FPS
         self.energy = 0
         self.species = species if species else random.choice(["wolfA", "wolfB"])
         self.attack_damage = 10  # Reduced damage from before
@@ -542,7 +571,6 @@ def main():
     scavengers = [Scavenger(random.randint(0, WIDTH), random.randint(0, HEIGHT)) for _ in range(3)]
     predators = [Predator(random.randint(0, WIDTH), random.randint(0, HEIGHT)) for _ in range(2)]
     plants = [Plant(random.randint(0, WIDTH), random.randint(0, HEIGHT)) for _ in range(30)]
-    water_sources = [WaterSource(random.randint(0, WIDTH), random.randint(0, HEIGHT)) for _ in range(5)]
     
     frame_count = 0
     
@@ -558,12 +586,8 @@ def main():
         
         for plant in plants:
             plant.update()
-        for water in water_sources:
-            water.update()
         if len(plants) < 35 and random.random() < 0.02:
             plants.append(Plant(random.randint(0, WIDTH), random.randint(0, HEIGHT)))
-        if len(water_sources) < 8 and random.random() < 0.01:
-            water_sources.append(WaterSource(random.randint(0, WIDTH), random.randint(0, HEIGHT)))
         
         # Update creatures
         for g in goblins[:]:
@@ -571,26 +595,26 @@ def main():
             g.try_attack(boars, predators, plants)
             g.try_forage(plants, boars)
             g.try_reproduce(goblins)
-            if g.health <= 0:
+            if g.health <= 0 or g.update_hunger():
                 goblins.remove(g)
         for b in boars[:]:
             b.update(goblins, plants, speed_global=speed_factor)
             b.try_attack(goblins)
             b.try_reproduce(boars)
-            if b.health <= 0:
+            if b.health <= 0 or b.update_hunger():
                 boars.remove(b)
         for s in scavengers[:]:
             s.update(goblins, plants, scavengers, speed_global=speed_factor)
             s.try_steal(goblins)
             s.try_forage(plants)
             s.try_reproduce(scavengers)
-            if s.health <= 0:
+            if s.health <= 0 or s.update_hunger():
                 scavengers.remove(s)
         for p in predators[:]:
             p.update(goblins, boars, scavengers, predators, speed_global=speed_factor)
             p.try_attack(goblins, boars, scavengers)
             p.try_reproduce(predators)
-            if p.health <= 0:
+            if p.health <= 0 or p.update_hunger():
                 predators.remove(p)
         
         # External spawning only if population of that type is less than 3.
@@ -633,9 +657,6 @@ def main():
         
         for rect, mod in TERRAIN_ZONES:
             pygame.draw.rect(screen, (30, 60, 30), rect, 2)
-        for water in water_sources:
-            if water.active:
-                pygame.draw.circle(screen, (0, 191, 255), (int(water.pos[0]), int(water.pos[1])), 6)
         for plant in plants:
             if plant.active:
                 pygame.draw.circle(screen, (0,255,0), (int(plant.pos[0]), int(plant.pos[1])), 5)
@@ -652,7 +673,7 @@ def main():
             pygame.draw.circle(screen, (100,100,100), (int(p.pos[0]), int(p.pos[1])), 7)
         
         metrics = (f"Goblins: {len(goblins)}  Boars: {len(boars)}  Scavengers: {len(scavengers)}  "
-                   f"Predators: {len(predators)}  Plants: {len(plants)}  Water: {len(water_sources)}")
+                   f"Predators: {len(predators)}  Plants: {len(plants)}")
         text_surface = font.render(metrics, True, (255,255,255))
         screen.blit(text_surface, (10, 10))
         
