@@ -61,7 +61,7 @@ class WaterSource:
 class Creature:
     def __init__(self, x, y, health, base_speed):
         self.pos = np.array([x, y], dtype=float)
-        self.vel = np.array([0, 0], dtype=float)
+        self.vel = np.array([0.0, 0.0], dtype=float)  # Ensure vel is float64
         self.health = health
         self.max_health = health
         self.base_speed = base_speed
@@ -271,6 +271,7 @@ class Goblin(Creature):
 class Boar(Creature):
     def __init__(self, x, y, species=None, action_weights=None):
         super().__init__(x, y, 100, base_speed=1.5)
+        self.vel = np.array([0.0, 0.0], dtype=np.float64)  # Ensure vel is float64
         self.foraging_counter = 0
         self.reproduction_weight = 1.0
         self.state = "wandering"
@@ -311,8 +312,11 @@ class Boar(Creature):
                 norm = np.linalg.norm(rand_dir) + 1e-5
                 self.vel = (rand_dir / norm) * self.base_speed * speed_global
                 self.foraging_counter = max(0, self.foraging_counter - 1)
-        self.vel *= get_terrain_factor(self.pos)
+        self.vel = self.vel.astype(np.float64)  # Ensure vel is float64
+        self.vel *= np.float64(get_terrain_factor(self.pos))
         self.update_position()
+
+    
     def try_attack(self, goblins):
         for g in goblins[:]:
             if distance(self.pos, g.pos) < 10:
@@ -540,16 +544,13 @@ def main():
     plants = [Plant(random.randint(0, WIDTH), random.randint(0, HEIGHT)) for _ in range(30)]
     water_sources = [WaterSource(random.randint(0, WIDTH), random.randint(0, HEIGHT)) for _ in range(5)]
     
-    day_time = 0
     frame_count = 0
     
     running = True
     while running:
         clock.tick(FPS)
         frame_count += 1
-        day_time = (day_time + 1) % DAY_LENGTH
-        brightness = 0.5 + 0.5 * math.sin(2 * math.pi * day_time / DAY_LENGTH)
-        speed_factor = 0.5 + 0.5 * brightness
+        speed_factor = 1.0  # Constant speed factor
         
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -627,7 +628,7 @@ def main():
                 x, y = random.randint(0, WIDTH), HEIGHT + 10
             predators.append(Predator(x, y))
         
-        bg_color = (int(50*brightness), int(50*brightness), int(80*brightness))
+        bg_color = (50, 50, 80)  # Constant background color
         screen.fill(bg_color)
         
         for rect, mod in TERRAIN_ZONES:
@@ -651,7 +652,7 @@ def main():
             pygame.draw.circle(screen, (100,100,100), (int(p.pos[0]), int(p.pos[1])), 7)
         
         metrics = (f"Goblins: {len(goblins)}  Boars: {len(boars)}  Scavengers: {len(scavengers)}  "
-                   f"Predators: {len(predators)}  Plants: {len(plants)}  Water: {len(water_sources)}  Time: {day_time}")
+                   f"Predators: {len(predators)}  Plants: {len(plants)}  Water: {len(water_sources)}")
         text_surface = font.render(metrics, True, (255,255,255))
         screen.blit(text_surface, (10, 10))
         
